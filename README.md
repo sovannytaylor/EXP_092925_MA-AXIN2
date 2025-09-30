@@ -1,4 +1,4 @@
-# TNK-AXIN2 Exeriment for Mub
+# TNK-AXIN2 Experiment for Mub
 
 Experiment ID: Mubs TNK experiment
 
