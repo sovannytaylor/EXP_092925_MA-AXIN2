@@ -1,4 +1,4 @@
-# image_analysis_template
+# TNK-ATXN2 Exeriment for Mub
 
 Experiment ID: Mubs TNK experiment
 
