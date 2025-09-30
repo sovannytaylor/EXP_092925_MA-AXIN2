@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import skimage.io
 import functools
 import cv2
+from skimage.color import label2rgb
 from skimage import measure, segmentation, morphology
 from scipy.stats import skewtest, skew
 from skimage import morphology
@@ -24,12 +25,16 @@ input_folder = 'python_results/initial_cleanup/'
 mask_folder = 'python_results/napari_masking/'
 output_folder = 'python_results/summary_calculations/'
 plotting_folder = 'python_results/plotting/'
+proof_folder = 'python_results/proofs/'
 
 if not os.path.exists(output_folder):
     os.mkdir(output_folder)
 
 if not os.path.exists(plotting_folder):
     os.mkdir(plotting_folder)
+
+if not os.path.exists(proof_folder):
+    os.mkdir(proof_folder)
 
 def feature_extractor(mask, properties=False):
 
@@ -238,20 +243,41 @@ for name, image in filtered_cells.items():
         condenschan_mean = np.mean(condenschan[condenschan != 0])
 
         # thresholding to define condensates
-        binary = (condenschan > ((condenschan_std * 5))).astype(int)
+        binary = (condenschan > ((condenschan_std * 2))).astype(int)
         condens_masks = measure.label(binary)
         condens_masks = remove_small_objects(condens_masks, 9)
+
+        # === PROOF PLOTTING ===
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+
+        # left: raw condensate channel
+        axes[0].imshow(condenschan, cmap='gray')
+        axes[0].set_title("Channel 2 (Condensate)")
+        axes[0].axis('off')
+
+        # right: masks overlayed
+        overlay = label2rgb(condens_masks, image=condenschan, bg_label=0, alpha=0.3)
+        axes[1].imshow(overlay)
+        axes[1].set_title("Condensate Masks")
+        axes[1].axis('off')
+
+        plt.suptitle(f"Proof: {name}, Cell {num}", fontsize=12)
+        plt.tight_layout()
+
+        # Save instead of show (change to plt.show() for interactive)
+        plt.savefig(os.path.join(proof_folder, f"{name}_cell{num}.png"), dpi=200)
+
+        plt.close()
+        # =======================
 
         # measure properties of condensate masks
         condens_properties = feature_extractor(condens_masks).add_prefix('condens_')
 
         # make list for cov and skew, add as columns to properties for TNK-FLAG and TNK-ab channels
         tnk_flag_condens_cv_list = []
-        tnk_flag_condens_skew_list = []
         tnk_flag_condens_intensity_list = []
 
         tnk_ab_condens_cv_list = []
-        tnk_ab_condens_skew_list = []
         tnk_ab_condens_intensity_list = []
 
         for condens_num in np.unique(condens_masks)[1:]:
@@ -260,7 +286,6 @@ for name, image in filtered_cells.items():
             tnk_flag_condens = tnk_flag_condens[tnk_flag_condens != 0]
             tnk_flag_condens_cv = np.std(tnk_flag_condens) / np.mean(tnk_flag_condens)
             tnk_flag_condens_cv_list.append(tnk_flag_condens_cv)
-            tnk_flag_condens_skew_list.append(skew(tnk_flag_condens))
             tnk_flag_condens_intensity_list.append(np.mean(tnk_flag_condens))
 
             # per-condensate TNK-antibody measurements
@@ -268,16 +293,13 @@ for name, image in filtered_cells.items():
             tnk_ab_condens = tnk_ab_condens[tnk_ab_condens != 0]
             tnk_ab_condens_cv = np.std(tnk_ab_condens) / np.mean(tnk_ab_condens)
             tnk_ab_condens_cv_list.append(tnk_ab_condens_cv)
-            tnk_ab_condens_skew_list.append(skew(tnk_ab_condens))
             tnk_ab_condens_intensity_list.append(np.mean(tnk_ab_condens))
 
         # store measurements
         condens_properties['tnk_flag_condens_cv'] = tnk_flag_condens_cv_list
-        condens_properties['tnk_flag_condens_skew'] = tnk_flag_condens_skew_list
         condens_properties['tnk_flag_condens_intensity'] = tnk_flag_condens_intensity_list
 
         condens_properties['tnk_ab_condens_cv'] = tnk_ab_condens_cv_list
-        condens_properties['tnk_ab_condens_skew'] = tnk_ab_condens_skew_list
         condens_properties['tnk_ab_condens_intensity'] = tnk_ab_condens_intensity_list
 
         # if no condensates, fill with 0
@@ -296,7 +318,7 @@ for name, image in filtered_cells.items():
         properties['cell_coords'] = [contour] * len(properties)
 
         feature_information_list.append(properties)
-        
+
 feature_information = pd.concat(feature_information_list)
 logger.info('completed feature collection')
 
