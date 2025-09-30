@@ -15,6 +15,8 @@ from skimage.color import label2rgb
 from skimage import measure, segmentation, morphology
 from scipy.stats import skewtest, skew
 from skimage import morphology
+from skimage.measure import regionprops
+from skimage.morphology import dilation, disk
 from skimage.morphology import remove_small_objects
 from statannotations.Annotator import Annotator
 from loguru import logger
@@ -42,6 +44,15 @@ def feature_extractor(mask, properties=False):
         properties = ['area', 'eccentricity', 'label', 'major_axis_length', 'minor_axis_length', 'perimeter', 'coords']
 
     return pd.DataFrame(skimage.measure.regionprops_table(mask, properties=properties))
+
+
+def remove_large_objects(label_image, max_size):
+    out = np.zeros_like(label_image)
+    for region in regionprops(label_image):
+        if region.area <= max_size:
+            out[label_image == region.label] = region.label
+    return out
+
 
 # ----------------Initialise file list----------------
 file_list = [filename for filename in os.listdir(
@@ -153,7 +164,7 @@ for name, image in image_mask_dict.items():
 # ---- threshold FLAG positve and GFP positive cells ----
 # Threshold values
 ch0_thresh = 2000  # TNK-FLAG
-ch2_thresh = 2000  # AXIN2 GFP / condensate
+ch2_thresh = 500  # AXIN2 GFP / condensate
 
 filtered_cells = {}
 
@@ -243,30 +254,34 @@ for name, image in filtered_cells.items():
         condenschan_mean = np.mean(condenschan[condenschan != 0])
 
         # thresholding to define condensates
-        binary = (condenschan > ((condenschan_std * 2))).astype(int)
+        # i decided to not do global cut off per cell but basing it off of the local mean intensity
+        threshold = condenschan_mean + (2 * condenschan_std)
+        binary = (condenschan > threshold).astype(int)
+        binary = dilation(binary, disk(1))  # expand puncta edges
         condens_masks = measure.label(binary)
         condens_masks = remove_small_objects(condens_masks, 9)
+        # remove large objects (>500 area)
+        condens_masks = remove_large_objects(condens_masks, 500)
 
         # === PROOF PLOTTING ===
         fig, axes = plt.subplots(1, 2, figsize=(8, 4))
 
-        # left: raw condensate channel
-        axes[0].imshow(condenschan, cmap='gray')
+        # left: raw condensate channel, inverted (white background, dark puncta)
+        axes[0].imshow(condenschan, cmap='gray_r')  # note the "_r" = reversed colormap
         axes[0].set_title("Channel 2 (Condensate)")
         axes[0].axis('off')
 
-        # right: masks overlayed
-        overlay = label2rgb(condens_masks, image=condenschan, bg_label=0, alpha=0.3)
-        axes[1].imshow(overlay)
+        # right: masks overlayed on inverted grayscale
+        overlay = label2rgb(condens_masks, image=condenschan, bg_label=0, alpha=0.3, bg_color=(1,1,1))
+        axes[1].imshow(overlay, cmap='gray_r')
         axes[1].set_title("Condensate Masks")
         axes[1].axis('off')
 
         plt.suptitle(f"Proof: {name}, Cell {num}", fontsize=12)
         plt.tight_layout()
 
-        # Save instead of show (change to plt.show() for interactive)
+        # Save instead of show
         plt.savefig(os.path.join(proof_folder, f"{name}_cell{num}.png"), dpi=200)
-
         plt.close()
         # =======================
 
@@ -347,11 +362,13 @@ features_of_interest = ['condens_area', 'condens_eccentricity',
 'tnk_flag_condens_cv', 'tnk_flag_condens_intensity',
 'tnk_ab_condens_cv', 'tnk_ab_condens_intensity','cell_size', 'cell_tng_flag_mean','cell_tnk_ab_mean','tnk_ab_part_coeff', 'tnk_flag_part_coeff', 'condens_aspect_ratio','condens_circularity']
 
-condens_summary_reps = []
+condens_summary_percell = []
 for col in features_of_interest:
-    reps_table = feature_information.groupby(['variant']).mean(numeric_only=True)[f'{col}']
-    condens_summary_reps.append(reps_table)
-condens_summary_reps_df = functools.reduce(lambda left, right: pd.merge(left, right, on=['variant'], how='outer'), condens_summary_reps).reset_index()
+    reps_table = feature_information.groupby(['variant','cell_number']).mean(numeric_only=True)[f'{col}']
+    condens_summary_percell.append(reps_table)
+condens_summary_percell_df = functools.reduce(lambda left, right: pd.merge(left, right, on=['variant','cell_number'], how='outer'), condens_summary_percell).reset_index()
+
+condens_summary_percell_df.to_csv(f'{output_folder}AXIN2_GFP-pos_TNKflag-pos_puncta-detection_feature_info_percell.csv')
 
 # --------------visualize calculated parameters - raw --------------
 
@@ -391,9 +408,18 @@ for fig_num in range(num_figures):
 
 #---Plotting specific plots --------------
 
-x = 'variant'
-order = ['wt','E66K', 'G67R', 'P50S', 'R68Q', 'R77Q', 'V40G']
+# Count number of cells per variant
+cell_counts = condens_summary_percell_df['variant'].value_counts().to_dict()
 
+
+# Add a new column with the labels for plotting
+condens_summary_percell_df['variant_labeled'] = condens_summary_percell_df['variant'].map(
+    lambda v: f"{v} (n={cell_counts.get(v, 0)})"
+)
+
+# Then update plotting variable
+x = 'variant_labeled'
+order = ['wt','E66K', 'G67R', 'P50S', 'R68Q', 'R77Q', 'V40G']
 
 # ✅ Only include the features you want to plot
 features_of_interest = ['tnk_ab_part_coeff', 'tnk_flag_part_coeff']
@@ -402,10 +428,14 @@ plots_per_fig = 2
 num_features = len(features_of_interest)
 num_figures = math.ceil(num_features / plots_per_fig)
 
+# Find global min and max across all features
+ymin = condens_summary_percell_df[features_of_interest].min().min()
+ymax = condens_summary_percell_df[features_of_interest].max().max()
+
 for fig_num in range(num_figures):
     plt.figure(figsize=(20, 8))
     plt.subplots_adjust(hspace=0.5)
-    plt.suptitle(f'Partitioning Coeff - per condensate', fontsize=18, y=0.99)
+    plt.suptitle(f'Partitioning Coeff - per cell', fontsize=18, y=0.99)
 
     start_idx = fig_num * plots_per_fig
     end_idx = min(start_idx + plots_per_fig, num_features)
@@ -413,16 +443,29 @@ for fig_num in range(num_figures):
 
     for i, parameter in enumerate(current_features):
         ax = plt.subplot(2, 3, i + 1)
-        sns.stripplot(data=feature_information, x=x, y=parameter, dodge=True, edgecolor='white', linewidth=1, size=8, alpha=0.4, order=order, ax=ax)
-        sns.boxplot(data=feature_information, x=x, y=parameter, palette=['.9'], order=order, ax=ax)
+
+        sns.stripplot(
+            data=condens_summary_percell_df, 
+            x=x, y=parameter,
+            dodge=True, edgecolor='white', linewidth=1,
+            size=8, alpha=0.4, order=order, ax=ax
+        )
+        sns.boxplot(
+            data=condens_summary_percell_df, 
+            x=x, y=parameter,
+            palette=['.9'], order=order, ax=ax
+        )
+
+        ax.set_ylim(ymin, ymax)  # 🔑 ensure same y-axis across plots
         ax.set_title(parameter, fontsize=12)
         ax.set_xlabel('')
+        
         plt.xticks(rotation=45)
         sns.despine()
 
     plt.tight_layout()
 
-    output_path = f'{output_folder}/partition_coeffs.png'
+    output_path = f'{output_folder}/partition_coeffs_percell.png'
     plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
     plt.show()
 
